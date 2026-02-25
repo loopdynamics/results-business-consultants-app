@@ -1,0 +1,113 @@
+name: Update Initial Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  update-initial-release:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Determine source release
+        id: source
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            LATEST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' --repo ${{ github.repository }})
+            echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "Using latest release: $LATEST_TAG"
+          else
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+            echo "Using release from event: ${{ github.event.release.tag_name }}"
+          fi
+      
+      - name: Download release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p temp-assets
+          mkdir -p processed-assets
+          gh release download "${{ steps.source.outputs.tag }}" --dir temp-assets --repo ${{ github.repository }}
+          echo "Downloaded files:"
+          ls -la temp-assets/
+      
+      - name: Process and rename files
+        run: |
+          cd temp-assets
+          if [ -f "latest-mac.yml" ]; then cp latest-mac.yml ../processed-assets/; fi
+          if [ -f "latest.yml" ]; then cp latest.yml ../processed-assets/; fi
+          DMG_FILE=$(find . -name "results-business-consultants-*.dmg" -type f | head -n 1)
+          if [ -n "$DMG_FILE" ]; then cp "$DMG_FILE" ../processed-assets/results-macos-installer.dmg; fi
+          EXE_FILE=$(find . -name "results-business-consultants-*-setup.exe" -type f | head -n 1)
+          if [ -n "$EXE_FILE" ]; then
+            cp "$EXE_FILE" ../processed-assets/results-windows-installer.exe
+            cd ../processed-assets
+            zip results-windows-installer.exe.zip results-windows-installer.exe
+            cd ../temp-assets
+          fi
+          cd ..
+          ls -la processed-assets/
+      
+      - name: Get or Create Initial Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view initial --repo ${{ github.repository }} > /dev/null 2>&1; then
+            echo "Initial release exists, will update it..."
+          else
+            gh release create initial --title "Latest Stable Release - Auto Updated" --notes "Auto-updated with latest stable version." --repo ${{ github.repository }}
+          fi
+      
+      - name: Delete old assets from initial release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view initial --repo ${{ github.repository }} --json assets --jq '.assets[].name' | while read -r asset; do
+            gh release delete-asset initial "$asset" --repo ${{ github.repository }} --yes || true
+          done
+      
+      - name: Upload new assets to initial release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for file in processed-assets/*; do
+            if [ -f "$file" ]; then
+              gh release upload initial "$file" --repo ${{ github.repository }} --clobber
+            fi
+          done
+      
+      - name: Update initial release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST_VERSION="${{ steps.source.outputs.tag }}"
+          CURRENT_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          RELEASE_NAME=$(gh release view "$LATEST_VERSION" --json name --jq .name --repo ${{ github.repository }} || echo "Release")
+          cat > release-notes.md << EOF
+          # Results Business Consultants - Latest Release
+
+          This release automatically mirrors the latest stable version of the application.
+
+          **Current Version:** $LATEST_VERSION
+          **Release Name:** $RELEASE_NAME
+          **Last Updated:** $CURRENT_DATE
+
+          ## Download Files
+          - **Windows Installer:** results-windows-installer.exe (also available as .zip)
+          - **macOS Installer:** results-macos-installer.dmg
+          - **Auto-update files:** latest.yml and latest-mac.yml
+
+          ---
+          *Automatically synchronized from [$LATEST_VERSION](https://github.com/${{ github.repository }}/releases/tag/$LATEST_VERSION) on $CURRENT_DATE*
+          EOF
+          gh release edit initial --notes-file release-notes.md --repo ${{ github.repository }}
+          echo "Initial release updated successfully!"
