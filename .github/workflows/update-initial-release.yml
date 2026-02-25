@@ -22,15 +22,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            LATEST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' --repo ${{ github.repository }})
+            LATEST_TAG=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName' --repo ${{ github.repository }})
             echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
             echo "Using latest release: $LATEST_TAG"
           else
-            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
-            echo "Using release from event: ${{ github.event.release.tag_name }}"
+            TAG="${{ github.event.release.tag_name }}"
+            if [ "$TAG" == "initial" ]; then
+              echo "Skipping — triggered by initial release itself"
+              echo "skip=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "Using release from event: $TAG"
           fi
+          echo "skip=false" >> $GITHUB_OUTPUT
       
       - name: Download release assets
+        if: steps.source.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -41,6 +49,7 @@ jobs:
           ls -la temp-assets/
       
       - name: Process and rename files
+        if: steps.source.outputs.skip != 'true'
         run: |
           cd temp-assets
           if [ -f "latest-mac.yml" ]; then cp latest-mac.yml ../processed-assets/; fi
@@ -58,16 +67,22 @@ jobs:
           ls -la processed-assets/
       
       - name: Get or Create Initial Release
+        if: steps.source.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if gh release view initial --repo ${{ github.repository }} > /dev/null 2>&1; then
             echo "Initial release exists, will update it..."
           else
-            gh release create initial --title "Latest Stable Release - Auto Updated" --notes "Auto-updated with latest stable version." --repo ${{ github.repository }}
+            gh release create initial \
+              --title "Latest Stable Release - Auto Updated" \
+              --notes "Auto-updated with latest stable version." \
+              --latest=false \
+              --repo ${{ github.repository }}
           fi
       
       - name: Delete old assets from initial release
+        if: steps.source.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -76,6 +91,7 @@ jobs:
           done
       
       - name: Upload new assets to initial release
+        if: steps.source.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -86,6 +102,7 @@ jobs:
           done
       
       - name: Update initial release notes
+        if: steps.source.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -109,5 +126,16 @@ jobs:
           ---
           *Automatically synchronized from [$LATEST_VERSION](https://github.com/${{ github.repository }}/releases/tag/$LATEST_VERSION) on $CURRENT_DATE*
           EOF
-          gh release edit initial --notes-file release-notes.md --repo ${{ github.repository }}
+          gh release edit initial --notes-file release-notes.md --latest=false --repo ${{ github.repository }}
           echo "Initial release updated successfully!"
+      
+      - name: Ensure versioned release stays Latest
+        if: steps.source.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases/tags/${{ steps.source.outputs.tag }} --jq '.id')
+          gh api repos/${{ github.repository }}/releases/$RELEASE_ID \
+            --method PATCH \
+            --field make_latest=true > /dev/null
+          echo "Ensured ${{ steps.source.outputs.tag }} is marked as Latest"
